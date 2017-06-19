@@ -25,6 +25,7 @@ class FTPClient(object):
         self.verify_args(self.options,self.args)#判断参数
         self.ser_connect()#连接服务端
         self.cmd_list=config.CMD_LIST
+        self.rat=0#文件断点
 
     #实例化一个连接端
     def ser_connect(self):
@@ -60,6 +61,9 @@ class FTPClient(object):
                 else:
                     ret_count+=1#次数加一
                     print('认证出错次数[%s]'%ret_count)
+            else:
+                print('密码出错次数过多!')
+                exit()
 
     #'''用户名与密码检验'''
     def get_user_pwd(self,username,password):
@@ -75,6 +79,7 @@ class FTPClient(object):
         if response.get('status_code') == 244:
             print(STATUS_CODE[244])
             self.user = username#存下用户名
+            self.user_dir=response.get('dir')#目录
             return True
         else:
             print(response.get("status_msg") )
@@ -93,15 +98,11 @@ class FTPClient(object):
         ----------------------------------
         info            个人信息
         ----------------------------------
-        ls              查看当前目录(linux)
+        ls              查看当前目录(linux/windows)
         ----------------------------------
-        dir             查看当前目录(windows)
+        pwd             查看当前路径(linux/windows)
         ----------------------------------
-        pwd             查看当前路径(linux)
-        ----------------------------------
-        cd              查看当前路径(windows)
-        ----------------------------------
-        cd 目录         切换目录(linux)
+        cd 目录         切换目录(linux/windows)
         ----------------------------------
         get filename    下载文件
         ----------------------------------
@@ -109,15 +110,11 @@ class FTPClient(object):
         ----------------------------------
         --md5           使用md5  在get/put 后
         ----------------------------------
-        mkdir name      创建目录(linux)
+        mkdir name      创建目录(linux/windows)
         ----------------------------------
-        md name         创建目录(windows)
+        rmdir name      删除目录(linux/windows)
         ----------------------------------
-        mv filename     移动文件
-        ----------------------------------
-        rm filename     删除文件
-        ----------------------------------
-        copy filename   复制文件
+        rm filename     删除文件 (linux/windows)
         ----------------------------------
         exit            退出
         ----------------------------------
@@ -130,7 +127,7 @@ class FTPClient(object):
             print('指令界面'.center(60,'='))
             self.help()
             while True:
-                cmd = input('[%s]-->指令>>>:'%self.user).strip()
+                cmd = input('[%s]-->指令>>>:'%self.user_dir).strip()
                 if len(cmd)==0:continue#输入空跳过
                 if cmd=='exit':exit()#退出指令
                 cmd_str=cmd.split()#用空格分割 取命令到列表
@@ -172,15 +169,6 @@ class FTPClient(object):
                   current_percent = int((received_size / total) * 100 )
              new_size = yield #断点跳转 传入的大小
              received_size += new_size
-    #上传方法
-
-    #查看命令
-    # def cmd_dir(self,cmd_str,**kwargs):
-    #     mag_dict={
-    #                 "action":"dir",
-    #                 'actionname':cmd_str[0]
-    #             }
-    #     self.c.send(json.dumps(mag_dict).encode('utf-8'))#发送数据
 
     #单个命令
     def cmd_compr(self,cmd_str,**kwargs):
@@ -189,19 +177,14 @@ class FTPClient(object):
                     'actionname':cmd_str[0]
                 }
         self.c.send(json.dumps(mag_dict).encode('utf-8'))#发送数据
-        data=self.c.recv(1024)#接收数据 数据
-        cmd_res_attr=json.loads(data)
-        #print(type(cmd_res_attr))
+        cmd_res_attr=self.get_response()#得到服务器的回复
         if type(cmd_res_attr) is not int:#如果不int 类型
             if cmd_res_attr["status_code"] ==241:#命令不对
-                #print(data)
                 print(cmd_res_attr['status_msg'])
                 return
             if cmd_res_attr["status_code"] ==240:#命令不对
                 print(cmd_res_attr['status_msg'])
                 return
-
-        print('数据大小:',cmd_res_attr)
         size_l=0#收数据当前大小
         self.c.send('准备好接收了，可以发了'.encode('utf-8'))
         receive_data= ''.encode()
@@ -211,14 +194,19 @@ class FTPClient(object):
             receive_data += data
         else:
             receive_data=receive_data.decode()
-            receive_data=eval(receive_data)#转为列表 或字典
+            try:
+                receive_data=eval(receive_data)#转为列表 或字典
+            except Exception as e:
+                pass
             if type(receive_data) is dict:#如果是字典
                 for i in receive_data:
                     print(i,receive_data[i])
+                return 1
             if type(receive_data) is list:#如果是列表
                 for i in receive_data:
                     print(i)
-
+                return 1
+            print(receive_data)
             return 1
 
     #切换目录
@@ -232,23 +220,96 @@ class FTPClient(object):
         msg_l=self.c.recv(1024)#接收数据 消息
         data=json.loads(msg_l.decode())
         if data["status_code"] ==251:#目录不可切换
-            print(data)
             print(data['status_msg'])
             return
         elif data["status_code"] ==252:#目录可以换
+            print(data['status_msg'])
             self.c.send(b'1')#发送到服务器,表示可以了
             data=self.c.recv(1024)
             print(data.decode())
+            user_dir=data.decode()
+            print(user_dir)
+            self.user_dir=user_dir
+            return
+        elif data["status_code"] ==256:#目录不存在
+            print(data['status_msg'])
             return
 
+    #删除文件
+    def cmd_rm(self,cmd_list,**kwargs):
+        mag_dict={
+                    "action":"rm",
+                    'filename':cmd_list[1]
+                }
+        self.c.send(json.dumps(mag_dict).encode('utf-8'))#发送文件信息
+        data=self.get_response()#得到服务器的回复
+        if data["status_code"] ==245:#文件不存在
+            print(data['status_msg'])
+            #print('删除前空间：',data['剩余空间'])
+            return
+        elif data["status_code"] ==254:#文件删除完成
+            print(data['status_msg'])
+            print('删除前空间：',data['剩余空间'])
+            pass
+        self.c.send(b'1')#发送到服务器,表示可以
+        data=self.get_response()#得到服务器的回复
+        if data["status_code"] ==255:#文件删除完成
+            print(data['status_msg'])
+            print('删除后空间：',data['剩余空间'])
+            return
+
+    #创建目录
+    def cmd_mkdir(self,cmd_list,**kwargs):
+        mag_dict={
+                    "action":"mkdir",
+                    'filename':cmd_list[1]
+                }
+        self.c.send(json.dumps(mag_dict).encode('utf-8'))#发送文件信息
+        data=self.get_response()#得到服务器的回复
+        if data["status_code"] ==257:#目录已经存在
+            print(data['status_msg'])
+            return
+        elif data["status_code"] ==256:#目录创建中
+            print(data['目录'])
+            pass
+        self.c.send(b'1')#发送到服务器,表示可以
+        data=self.get_response()#得到服务器的回复
+        if data["status_code"] ==258:#目录创建中完成
+            print(data['status_msg'])
+            return
+        pass
+
+    #删除目录
+    def cmd_rmdir(self,cmd_list,**kwargs):
+        mag_dict={
+                    "action":"rmdir",
+                    'filename':cmd_list[1]
+                }
+        self.c.send(json.dumps(mag_dict).encode('utf-8'))#发送文件信息
+        data=self.get_response()#得到服务器的回复
+        if data["status_code"] ==256:#目录不存在
+            print(data['status_msg'])
+            return
+        elif data["status_code"] ==260:#目录不为空
+            print(data['status_msg'])
+            print(data['目录'])
+            return
+        elif data["status_code"] ==257:#目录删除中
+            print(data['目录'])
+            pass
+        self.c.send(b'1')#发送到服务器,表示可以
+        data=self.get_response()#得到服务器的回复
+        if data["status_code"] ==259:#目录删除完成
+            print(data['status_msg'])
+            return
+        pass
 
     #上传方法
     def cmd_put(self,cmd_list,**kwargs):#上传方法
         if len(cmd_list) > 1:
             filename=cmd_list[1]#取文件名
             filename_dir=config.PUT_DIR+filename#拼接文件名路径
-            #print(filename)
-            #print(filename_dir)
+
             if os.path.isfile(filename_dir):#是否是一个文件
                 filesize=os.stat(filename_dir).st_size#获取文件大小
                 #执行行为 名字,大小,是否
@@ -262,29 +323,43 @@ class FTPClient(object):
                 if self.cmd_md5_(cmd_list):#判断是否进行MD5
                     mag_dict['md5'] = True
                 self.c.send(json.dumps(mag_dict).encode('utf-8'))#发送文件信息
-                server_response=self.c.recv(1024)#服务器返回 确认
-                data=json.loads(server_response.decode())
-                if data["status_code"] ==250:#磁盘空间
+                data=self.get_response()#得到服务器的回复
+                if data["status_code"] ==250:#磁盘空间不足
                     print(data['status_msg'])
                     print(mag_dict['size'])
                     return
-                if data["status_code"] ==249:#如文件存在
+                if data["status_code"] ==249:#磁盘空间足够
                     print(data['status_msg'])
                     print('剩余空间',data['剩余空间'])
                     self.c.send(b'1')#发送到服务器,表示可以上传文件了
+                    data=self.get_response()#得到服务器的回复
+                    if data["status_code"] ==230:#断点续传
+                        print(data['status_msg'])
+                        print(data['文件大小'])
+                        self.rat=data['文件大小']#文件指针位置
+                        pass
+                    elif data["status_code"] ==231:#非断点续传
+                        print(data['status_msg'])
+                        self.rat=0#文件指针位置
+                        pass
                     f=open(filename_dir,'rb')#打开文件
+                    f.seek(self.rat)#移动到位置
                     print(mag_dict['md5'])
+                    self.c.send(b'1')#发送到服务器,表示可以上传文件了
                     if mag_dict['md5']==True:
                         md5_obj = hashlib.md5()#定义MD5
                         progress = self.show_pr(mag_dict['size']) #进度条 传入文件大小
                         progress.__next__()
-                        for line in f:
+                        while self.rat<filesize:
+                            line=f.read(1024)
                             self.c.send(line)
                             try:
                                 progress.send(len(line))#传入当前数据大小
                             except StopIteration as e:
                                 print("100%")
+                                break
                             md5_obj.update(line)#计算MD5
+
                         else:
                             print(filename,'发送完成!')
                             f.close()
@@ -297,12 +372,15 @@ class FTPClient(object):
                     else:
                         progress = self.show_pr(mag_dict['size']) #进度条 传入文件大小
                         progress.__next__()
-                        for line in f:
+                        #for line in f:
+                        while self.rat<filesize:
+                            line=f.read(1024)
                             self.c.send(line)
                             try:
                                 progress.send(len(line))#传入当前数据大小
                             except StopIteration as e:
                                 print("100%")
+                                break
                             #print(line)
                         else:
                             print(filename,'发送完成!')
@@ -317,20 +395,39 @@ class FTPClient(object):
         # if len(cmd_list) == 1:
         #     print("没有输入文件名.")
         #     return
+        #down_filename = cmd_list[1].split('/')[-1]#文件名
+        down_filename=cmd_list[1]#取文件名
+        file_path='%s/%s'%(config.GET_DIR,down_filename)#拼接文件路径 用户down目录
+        if os.path.isfile(file_path):#文件是否存
+            filesize=os.stat(file_path).st_size#获取文件大小
+            name_down=True
+        else:
+            filesize=0
+            name_down=False
         mag_dict={
                     "action":"get",
                     'filename':cmd_list[1],
+                    'name_down':name_down,
+                    'size':filesize
                 }
         if self.cmd_md5_(cmd_list):#判断是否进行MD5
             mag_dict['md5'] = True
         self.c.send(json.dumps(mag_dict).encode())#发送
+        self.c.send(b'1')#发送到服务器,防粘包
+
         response = self.get_response()#服务器返回文件 的信息
         if response["status_code"] ==247:#如文件存在
+            if name_down==True and response['file_size']==filesize:
+                print('文件已经下载完成')
+                self.c.send(b'2')
+                return
             self.c.send(b'1')#发送到服务器,表示可以接收文件了
-            down_filename = cmd_list[1].split('/')[-1]#文件名
-            received_size = 0#当前接收的数据大小
-            file_path='%s/%s'%(config.GET_DIR,down_filename)#拼接文件路径 用户down目录
-            file_obj = open(file_path,"wb")#打开文件
+            #if name_down:
+            received_size = filesize#当前接收的数据大小
+            #else:
+            #received_size = 0#当前接收的数据大小
+
+            file_obj = open(file_path,"ab")#打开文件
             if self.cmd_md5_(cmd_list):
                 md5_obj = hashlib.md5()
                 progress = self.show_pr(response['file_size']) #进度条 传入文件大小
@@ -360,6 +457,7 @@ class FTPClient(object):
                     if md5_from_server['status_code'] == 248:
                         if md5_from_server['md5'] == md5_val:
                             print("%s 文件一致性校验成功!" % down_filename)
+                    pass
             else:
                 progress = self.show_pr(response['file_size']) #进度条 传入文件大小
                 progress.__next__()
@@ -368,7 +466,7 @@ class FTPClient(object):
                         size=1024
                     else:#最后一次
                         size=response['file_size'] - received_size
-                        print('最后一个大小',size)
+                        #print('最后一个大小',size)
                     data= self.c.recv(size)#接收数据
 
                     try:
@@ -377,11 +475,13 @@ class FTPClient(object):
                       print("100%")
                     received_size+=len(data)#接收数据大小累加
                     file_obj.write(data)#写入文件
+                    pass
 
                 else:
                     print("下载完成".center(60,'-'))
                     file_obj.close()
-
+                    pass
+            self.c.send(b'1')#发送到服务器,表示可以接收文件了
 
 if __name__=='__main__':
 

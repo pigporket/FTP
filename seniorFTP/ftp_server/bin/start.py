@@ -8,6 +8,6 @@ sys.path.append(BASE_DIR)#增加环境变量
 
 from core import main
 
-
 if __name__ == '__main__':
+
     main.ArvgHandler()

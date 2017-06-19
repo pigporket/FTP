@@ -1,31 +1,45 @@
 #！usr/bin/env python
 #-*-coding:utf-8-*-
 # Author calmyan
-import socketserver,os,json,pickle,configparser
+import socketserver,os,json,pickle,configparser,time
+time_format='%Y%m%d%H%M%S'#定义时间格式
+times=time.strftime(time_format)#定义时间
 
 STATUS_CODE={
+    230:'文件断点继传',
+    231:'新文件',
     240:'格式出错,格式:{"action":"get","filename":"filename","size":100}',
     241:'指令错误',
     242:'用户名或密码为空',
     243:'用户或密码出错',
     244:'用户密码通过校验',
-    245:'文件不存在',
+    245:'文件不存在或不是文件',
     246:'服务器上该文件不存在',
     247:'准备发送文件,请接收',
     248:'md5',
     249:'准备接收文件,请上传',
     250:'磁盘空间不够',
     251:'当前已经为主目录',
-    252:'目录正在切换'
-
-
+    252:'目录正在切换',
+    253:'正在查看路径',
+    254:'准备删除文件',
+    255:'删除文件完成',
+    256:'目录不存在',
+    257:'目录已经存在',
+    258:'目录创建完成',
+    259:'目录删除完成',
+    260:'目录不是空的',
 }
 import os ,sys,hashlib
 BASE_DIR=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))#获取相对路径转为绝对路径赋于变量
 sys.path.append(BASE_DIR)#增加环境变量
 from cfg import config
+from core.logs import log_log
+from core.logs import user_opert
+
 
 class MyTCPHandler (socketserver.BaseRequestHandler):#
+
     def setup(self):
        print('监听中。。。')
     #'''用户名与密码是否为空'''
@@ -42,7 +56,16 @@ class MyTCPHandler (socketserver.BaseRequestHandler):#
             self.send_mge(243)
         else:
             self.user=name#保存用户名
-            self.send_mge(244)
+            self.home_dir='%s/%s'%(config.USER_HOME,self.user)#拼接 用户home目录路径 用户根目录
+            self.user_home_dir=self.home_dir#当前所在目录
+            # self.user_dir=self.user_home_dir.split('/')[-1]#当前所在目录 相对
+            self.dir_join()#进行目录拼接
+            self.send_mge(244,data={'dir':self.user_dir})#相对 目录
+
+    #目录拼接
+    def dir_join(self,*args,**kwargs):
+        self.user_dir=self.user_home_dir.split(self.home_dir)[-1]+'/'#当前所在目录 相对
+        print(self.user_dir)
 
     #'''用户名与密码的校验''
     def authusername(self,name,pwd):
@@ -54,41 +77,139 @@ class MyTCPHandler (socketserver.BaseRequestHandler):#
             if password==pwd:#密码正确
                 print('通过校验!')
                 config_info[name]['USERname']=name#名字的新字段
+                info_str='用户[%s],成功登陆'%name
+                self.log_log.warning(info_str)#记录日志
+                #log_log(info_str)
                 return config_info[name]
+            else:
+                info_str='用户[%s],登陆错误'%name
+                #log_log(info_str)
+                self.log_log.warning(info_str)#记录日志
+                return 0
+
+    #判断文件 是否存在
+    def file_name(self,file_path):
+        if os.path.isfile(file_path):#文件是否存
+            return  True
+        else:
+            return False
+
+    #判断目录是否存在
+    def file_dir(self,file_path):
+        if os.path.isdir(file_path):#目录是否存
+            return  True
+        else:
+            return False
+
+    #删除文件
+    def cmd_rm(self,*args,**kwargs):
+        cmd_dict=args[0]#获取字典
+        action=cmd_dict["action"]
+        filename =cmd_dict['filename']#文件名
+        file_path='%s/%s'%(self.user_home_dir,filename)#拼接文件路径
+        if not self.file_name(file_path):
+            self.send_mge(245)#文件不存在
+            return
+        else:
+            user_size=self.disk_size()#获取磁盘信息
+            self.send_mge(254,data={'剩余空间':user_size})#准备删除文件
+            file_size=os.path.getsize(file_path)#获取文件大小
+            pass
+        self.request.recv(1) #客户端确认 防粘包
+        os.remove(file_path)
+        new_size=float((float(user_size)+float(file_size))/1024000)#空间大小增加
+        self.set_info(str(new_size))#传入新大小
+        self.send_mge(255,data={'剩余空间':new_size})#删除文件完成
+        info_str=self.log_str('删除文件')#生成日志信息
+        self.user_opert.critical(info_str)#记录日志
+        return
+
+    #创建目录
+    def cmd_mkdir(self,*args,**kwargs):
+        cmd_dict=args[0]#获取字典
+        action=cmd_dict["action"]
+        filename =cmd_dict['filename']#目录名
+        file_path='%s/%s'%(self.user_home_dir,filename)#拼接目录路径
+        if self.file_dir(file_path):
+            self.send_mge(257)#目录已经 存在
+            return
+        else:
+            self.send_mge(256,data={'目录':'创建中...'})#目录创建中
+            self.request.recv(1) #客户端确认 防粘包
+            os.mkdir(file_path)#创建目录
+            self.send_mge(258)#目录完成
+            info_str=self.log_str('创建目录')#生成日志信息
+            self.user_opert.critical(info_str)#记录日志
+            return
+
+    #删除目录
+    def cmd_rmdir(self,*args,**kwargs):
+        cmd_dict=args[0]#获取字典
+        action=cmd_dict["action"]
+        filename =cmd_dict['filename']#目录名
+        file_path='%s/%s'%(self.user_home_dir,filename)#拼接目录路径
+        if not self.file_dir(file_path):
+            self.send_mge(256)#目录不存在
+            return
+        elif os.listdir(file_path):
+            self.send_mge(260,data={'目录':'无法删除'})#目录不是空的
+            return
+        else:
+            self.send_mge(257,data={'目录':'删除中...'})#目录创建中
+            self.request.recv(1) #客户端确认 防粘包
+            os.rmdir(file_path)#删除目录
+            self.send_mge(259)#目录删除完成
+            info_str=self.log_str('删除目录')#生成日志信息
+            self.user_opert.critical(info_str)#记录日志
+            return
+
+    #磁盘空间大小
+    def disk_size(self):
+        attr_list=self.user_info()#调用个人信息
+        put_size=attr_list[1]#取得磁盘信息
+        user_size=float(put_size)*1024000#字节
+        return user_size
 
     #'''客户端上传文件 '''
     def cmd_put(self,*args,**kwargs):
         '''客户端上传文件 '''
         cmd_dict=args[0]#获取字典
         filename =cmd_dict['filename']#文件名
-        filesize= cmd_dict['size']#文件大小
-        user_home_dir='%s/%s'%(config.USER_HOME,self.user)#拼接 用户home目录路径
-        file_path='%s/%s'%(user_home_dir,filename)#拼接文件路径 用户home目录
-        attr_list=self.user_info()#调用个人信息
-        put_size=attr_list[1]#取得磁盘信息
-        print(put_size,type(put_size))
-        user_size=float(put_size)*1024000#字节
-
-        if float(filesize)>float(user_size):#空间不足
+        file_size= cmd_dict['size']#文件大小
+        #user_home_dir='%s/%s'%(config.USER_HOME,self.user)#拼接 用户home目录路径
+        file_path='%s/%s'%(self.user_home_dir,filename)#拼接文件路径
+        user_size=self.disk_size()#取得磁盘信息
+        if float(file_size)>float(user_size):#空间不足
             self.send_mge(250,data={'剩余空间':user_size})
-            print(put_size)
             return
-        if os.path.isfile(file_path):#文件是否存
-            print(attr_list[1])
-            self.send_mge(249,data={'剩余空间':user_size})#发送一个确认
-            self.request.recv(1) #客户端确认 防粘包
-            f=open(filename+'.new','wb')#建一个新的文件
+        self.send_mge(249,data={'剩余空间':user_size})#发送一个确认
+        self.request.recv(1) #客户端确认 防粘包
+        if self.file_name(file_path):#判断文件名是否存在,
+            s_file_size=os.path.getsize(file_path)##获取服务器上的文件大小
+            if file_size>s_file_size:#如果服务器上的文件小于要上传的文件进
+                tmp_file_size=os.stat(file_path).st_size#计算临时文件大小
+                reversed_size=tmp_file_size#接收到数据大小
+                self.send_mge(230,data={'文件大小':reversed_size})#发送临时文件大小
+                pass
+            else:# file_size==s_file_size:#如果大小一样
+                file_path=file_path+'_'+times#命名新的文件 名
+                reversed_size=0#接收到数据大小
+                self.send_mge(231)#发送 不是断点文件
+                pass
         else:
-            f=open(filename,'wb')
+            reversed_size=0#接收到数据大小
+            self.send_mge(231)#发送 不是断点文件
+            pass
 
-        reversed_size=0#接收到数据大小
+        f=open(file_path,'ab')
+        self.request.recv(1) #客户端确认 防粘包
         if cmd_dict['md5']:#是否有 md5
             md5_obj = hashlib.md5() #   进行MD5
-            while reversed_size< int(filesize):#接收小于文件 大小
-                if int(filesize) - reversed_size>1024:#表示接收不止一次
+            while reversed_size< int(file_size):#接收小于文件 大小
+                if int(file_size) - reversed_size>1024:#表示接收不止一次
                     size=1024
                 else:#最后一次
-                    size=int(filesize) - reversed_size
+                    size=int(file_size) - reversed_size
                     #print('最后一个大小',size)
                 data= self.request.recv(size)#接收数据
                 md5_obj.update(data)
@@ -97,27 +218,27 @@ class MyTCPHandler (socketserver.BaseRequestHandler):#
             else:
                 f.close()
                 print('[%s]文件上传完毕'.center(60,'-')%filename)
-
                 md5_val = md5_obj.hexdigest()#得出MD5
                 print(md5_val)
                 self.send_mge(248,{'md5':md5_val})#发送md5给客户端
         else:
-            while reversed_size< int(filesize):#接收小于文件 大小
-                if int(filesize) - reversed_size>1024:#表示接收不止一次
+            while reversed_size< int(file_size):#接收小于文件 大小
+                if int(file_size) - reversed_size>1024:#表示接收不止一次
                     size=1024
                 else:#最后一次
-                    size=int(filesize) - reversed_size
+                    size=int(file_size) - reversed_size
                     #print('最后一个大小',size)
                 data= self.request.recv(size)#接收数据
-
                 reversed_size+=len(data)#接收数据大小累加
                 f.write(data)#写入文件
             else:
                 print('[%s]文件上传完毕'%filename.center(60,'-'))
                 f.close()
-        new_size=float((float(user_size)-float(filesize))/1024000)#扣除空间大小
+        new_size=float((float(user_size)-float(file_size))/1024000)#扣除空间大小
         self.set_info(str(new_size))#传入新大小
-
+        info_str=self.log_str('文件上传')#生成日志信息
+        self.user_opert.critical(info_str)#记录日志
+        return
 
     #用户下载文件
     def cmd_get(self,*args,**kwargs):#用户下载文件
@@ -126,25 +247,29 @@ class MyTCPHandler (socketserver.BaseRequestHandler):#
         print(data)
         if data.get('filename') is None:#判断文件名不为空
             self.send_mge(245)
-        print(config.USER_HOME)
-        print(self.user)
-        user_home_dir='%s/%s'%(config.USER_HOME,self.user)#拼接 用户home目录路径
-        #user_home_dir=config.USER_HOME+self.user#拼接 用户home目录路径
-        print(user_home_dir)
-        #file_path='%s\\%s'%(user_home_dir,data.get('filename'))#拼接文件路径 用户home目录
-        file_path='%s/%s'%(user_home_dir,data.get('filename'))#拼接文件路径 用户home目录
-        #print("file abs path",file_path)
+            return
 
+        self.request.recv(1) #客户端确认 防粘包
+        file_path='%s/%s'%(self.user_home_dir,data.get('filename'))#拼接文件路径 用户文件路径
         if os.path.isfile(file_path):#判断文件是否存在
             file_obj=open(file_path,'rb')#打开文件句柄\
             file_size=os.path.getsize(file_path)#获取文件大小
-
+            if data['name_down']:
+                send_size=data['size']#已经发送数据大小
+                #self.send_mge(230,data={'文件大小':file_size})#断点续传
+            else:
+                send_size=0
+                #self.send_mge(231)#非断点续传
+            #self.request.recv(1) #客户端确认 防粘包
+            file_obj.seek(send_size)#移动到
             self.send_mge(247,data={'file_size':file_size})#发送相关信息
-            self.request.recv(1) #客户端确认 防粘包
-
+            attr=self.request.recv(1024) #客户端确认 防粘包
+            if attr.decode()=='2':return #如果返回是
             if data.get('md5'):
                 md5_obj = hashlib.md5()
-                for line in file_obj:
+                while send_size<file_size:
+                    line=file_obj.read(1024)
+                #for line in file_obj:
                     self.request.send(line)
                     md5_obj.update(line)
                 else:
@@ -153,41 +278,65 @@ class MyTCPHandler (socketserver.BaseRequestHandler):#
                     self.send_mge(248,{'md5':md5_val})
                     print("发送完毕.")
             else:
-                for line in file_obj:
+                while send_size<file_size:
+                    line=file_obj.read(1024)
+                #for line in file_obj:
                     self.request.send(line)
                 else:
                     file_obj.close()
                     print("发送完毕.")
+            self.request.recv(1) #客户端确认 防粘包
+            info_str=self.log_str('下载文件')#生成日志信息
+            #user_opert(info_str)#记录日志
+            self.user_opert.critical(info_str)#记录日志
+            return
 
     #切换目录
     def cmd_cd(self,cmd_dict,*args,**kwargs):
         '''切换目录'''
-        self.dir_attr=config.USER_HOME#用户家目录
-        self.dir_attr='%s/%s'%(config.USER_HOME,self.user)#拼接 用户home目录路径
-        self.home_dir='/'#相对路径
-        print(config.USER_HOME)
-        print(self.home_dir)
         cmd_attr=cmd_dict['actionname']#获取命令
-        if cmd_attr=='..':
-            if self.dir_attr==config.USER_HOME:
+        if cmd_attr=='..' or cmd_attr=='../..':
+            if (self.home_dir)==self.user_home_dir:
                 self.send_mge(251)
                 return
-            else:
-                self.send_mge(252)#可以切换
-                #dir_list=self.dir_attr.split('\\')
-                dir_name=self.dir_attr.split('\\')[-1]#获取最后的目录
-                #new_dir='\\'.join(dir_list.difference(dir_name))#拼接新的路径
-                #print(new_dir)
+            elif cmd_attr=='../..':
+                self.send_mge(252)#可以切换到上级目录
+                self.user_home_dir=self.home_dir#绝对目录 = home
+                self.user_dir='/'
                 clinet_ack=self.request.recv(1024)#为了去粘包
-                self.request.send(dir_name.encode())
+                self.request.send(self.user_dir.encode())#返回相对目录
                 return
-        else:
+            else:
+                self.send_mge(252)#可以切换到上级目录
+                print(self.user_home_dir)#绝对目录
+                print(os.path.dirname(self.user_home_dir))#父级目录
+                self.user_home_dir=os.path.dirname(self.user_home_dir)#父级目录
+                self.dir_join()#目录拼接切换
+                clinet_ack=self.request.recv(1024)#为了去粘包
+                self.request.send(self.user_dir.encode())#返回相对目录
+                return
+
+        elif os.path.isdir(self.user_home_dir+'/'+cmd_attr):#如果目录存在
             self.send_mge(252)
-            new_dir=self.dir_attr+'\\'+cmd_attr
+            self.user_home_dir=self.user_home_dir+'/'+cmd_attr#目录拼接
+            self.dir_join()#相对目录拼接切换
             clinet_ack=self.request.recv(1024)#为了去粘包
-            self.request.send(new_dir.encode())
+            print(clinet_ack.decode())
+            self.request.send(self.user_dir.encode())
+            return
+        else:
+            self.send_mge(256)#目录不存在
             return
 
+    #查看目录路径 CD
+    def cmd_pwd(self,cmd_dict):
+        self.request.send(str(len(self.user_dir.encode('utf-8'))).encode('utf-8'))#发送大小
+        clinet_ack=self.request.recv(1024)#为了去粘包
+        self.request.send(self.user_dir.encode())#发送相对路径
+        info_str=self.log_str('查看目录路径')#生成日志信息
+        #logger.warning
+        self.user_opert.critical(info_str)#记录日志
+        return
 
     #修改个信息 磁盘大小
     def set_info(self,new_size):
@@ -213,25 +362,31 @@ class MyTCPHandler (socketserver.BaseRequestHandler):#
     #查看用户信息
     def cmd_info(self,*args,**kwargs):
         attr=self.user_info()
-        print(type(attr))
-        print(type(attr[0]))
-        self.request.send(str(len(json.dumps(attr[0]))).encode('utf-8'))#
+        info_dict=attr[0]
+        self.request.send(str(len(json.dumps(info_dict))).encode('utf-8'))#
         clinet_ack=self.request.recv(1024)#为了去粘包
-        self.request.send(json.dumps(attr[0]).encode('utf-8'))#发送指令
+        self.request.send(json.dumps(info_dict).encode('utf-8'))#发送指令
+        info_str=self.log_str('查看用户信息')#生成日志信息
+        self.user_opert.critical(info_str)#记录日志
+        return
+
+    #日志信息生成
+    def log_str(self,msg,**kwargs):
+        info_str='用户[%s]进行了[%s]操作'%(self.user,msg)
+        return info_str
 
 
     #目录查看
-    def cmd_dir(self,*args,**kwargs):
-        user_home_dir='%s/%s'%(config.USER_HOME,self.user)#拼接 用户home目录路径
-        #file_path='%s/%s'%(user_home_dir,'tmp')#拼接文件路径 用户home目录下
-        data=os.listdir(user_home_dir)#查看目录文件
+    def cmd_ls(self,*args,**kwargs):
+        data=os.listdir(self.user_home_dir)#查看目录文件
+        print(data)
         datas=json.dumps(data)#转成json格式
-        #print(datas)
         self.request.send(str(len(datas.encode('utf-8'))).encode('utf-8'))#发送大小
         clinet_ack=self.request.recv(1024)#为了去粘包
         self.request.send(datas.encode('utf-8'))#发送指令
-
-
+        info_str=self.log_str('目录查看')#生成日志信息
+        self.user_opert.critical(info_str)#记录日志
+        return
     ##单个命令
     def cmd_compr(self,cmd_dict,**kwargs):
         attr=cmd_dict['actionname']#赋于变量
@@ -253,24 +408,23 @@ class MyTCPHandler (socketserver.BaseRequestHandler):#
         print(mge)
         self.request.send(json.dumps(mge).encode())#发送给客户端
 
-
     #重写handle方法
     def handle(self):#重写handle方法
         while True:
             #try:
             self.data=self.request.recv(1024).strip()#接收数据
-            # print(self.client_address[0])#连接的ip
             print('ip:{}'.format(self.client_address[0]))#连接的ip
             print(self.data)
+            self.log_log=log_log()#登陆日志
+            self.user_opert=user_opert()#操作日志
             if not self.data:
-                print("客户端断开了!.")
+                print("[%s]客户端断开了!."%self.user)
+                info_str='用户[%s],退出'%self.user
+
                 break
             cmd_dict=json.loads(self.data.decode())#接收 数据
-            #print(cmd_dict)
             if cmd_dict.get('action') is not None:#判断数据格式正确
-                #print(cmd_dict,'111')
                 action=cmd_dict['action']#文件 头
-                #print(action)
                 if hasattr(self,'cmd_%s'%action):#是否存在
                     func=getattr(self,'cmd_%s'%action)#调用
                     func(cmd_dict)

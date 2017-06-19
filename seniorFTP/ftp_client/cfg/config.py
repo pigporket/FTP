@@ -9,7 +9,5 @@ sys.path.append(BASE_DIR)#增加环境变量
 
 PUT_DIR=BASE_DIR+'\putfile\\'#定义用户上传目录文件路径变量
 GET_DIR=BASE_DIR+'\down\\'#定义用户下载目录文件路径变量
-
 HELP='help'
-
-CMD_LIST=['ls','pwd','dir','cd','info','help']
+CMD_LIST=['ls','pwd','info','help']
